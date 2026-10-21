@@ -73,7 +73,7 @@ app.post('/api/auth/register', async (req, res) => {
       email,
       password,
       department,
-      role = 'borrower'
+      role = 'admin'
     } = req.body;
 
     const resolvedName = fullName || full_name;
@@ -84,15 +84,28 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Name, email, and password are required' });
     }
 
+    const cleanEmail = email.trim().toLowerCase();
+
     if (role === 'admin') {
-      // 1. Insert into profiles table
+      // Check if already registered
+      const { data: existing } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (existing) {
+        return res.status(400).json({ error: 'An admin with this email already exists.' });
+      }
+
+      // Insert directly into profiles table
       const { data, error } = await supabase
         .from('profiles')
         .insert([{
           full_name: resolvedName,
           staff_id: resolvedStaffId,
-          email: email.trim().toLowerCase(),
-          password_hash: password, // plain text
+          email: cleanEmail,
+          password_hash: password, // plain text for testing
           department: resolvedDept,
           role: 'admin',
           is_verified: true
@@ -100,17 +113,34 @@ app.post('/api/auth/register', async (req, res) => {
         .select()
         .single();
 
-      if (error) throw error;
-      return res.status(201).json({ message: 'Admin registered successfully', user: data });
+      if (error) {
+        console.error('Supabase profile insert error:', error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.status(201).json({
+        message: 'Admin registered and activated successfully!',
+        profile: data
+      });
     } else {
-      // 2. Insert into borrowers table
+      // Borrower flow
+      const { data: existing } = await supabase
+        .from('borrowers')
+        .select('id')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (existing) {
+        return res.status(400).json({ error: 'A borrower with this email already exists.' });
+      }
+
       const { data, error } = await supabase
         .from('borrowers')
         .insert([{
           full_name: resolvedName,
           staff_id: resolvedStaffId,
-          email: email.trim().toLowerCase(),
-          password: password, // plain text
+          email: cleanEmail,
+          password: password,
           department: resolvedDept,
           role: 'borrower',
           is_verified: true
@@ -118,95 +148,19 @@ app.post('/api/auth/register', async (req, res) => {
         .select()
         .single();
 
-      if (error) throw error;
-      return res.status(201).json({ message: 'Borrower registered successfully', user: data });
+      if (error) {
+        console.error('Supabase borrower insert error:', error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.status(201).json({
+        message: 'Borrower registered successfully!',
+        user: data
+      });
     }
   } catch (err) {
-    console.error('Registration error:', err);
+    console.error('Critical Register Handler Error:', err);
     return res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
-// 1. Fetch live catalog for both Mobile and Admin
-// 1. Fetch live catalog
-app.get('/api/catalog', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('items') // Change to 'items' or 'equipment_catalog'
-      .select('*')
-      .order('name');
-    if (error) throw error;
-    res.json(data || []);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 2. Restock endpoint
-app.post('/api/catalog', async (req, res) => {
-  try {
-    const { sku, name, category, quantity } = req.body;
-    
-    const { data: existing } = await supabase
-      .from('items') // Match table name
-      .select('*')
-      .eq('sku', sku)
-      .maybeSingle();
-
-    if (existing) {
-      const { data, error } = await supabase
-        .from('items')
-        .update({
-          total_quantity: Number(existing.total_quantity || 0) + Number(quantity),
-          available_quantity: Number(existing.available_quantity || 0) + Number(quantity)
-        })
-        .eq('id', existing.id)
-        .select()
-        .single();
-      if (error) throw error;
-      return res.json(data);
-    } else {
-      const { data, error } = await supabase
-        .from('items')
-        .insert([{
-          sku,
-          name,
-          category,
-          total_quantity: Number(quantity),
-          available_quantity: Number(quantity)
-        }])
-        .select()
-        .single();
-      if (error) throw error;
-      return res.json(data);
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-// Submit Requisition from Mobile App
-app.post('/api/requisitions', async (req, res) => {
-  try {
-    const { borrower_id, borrower_name, item_id, item_name, quantity } = req.body;
-
-    const { data, error } = await supabase
-      .from('requisitions')
-      .insert([{
-        borrower_id,
-        borrower_name,
-        item_id,
-        item_name,
-        quantity: parseInt(quantity, 10) || 1,
-        status: 'pending',
-        requested_at: new Date().toISOString()
-      }])
-      .select()
-      .single();
-
-    if (error) throw error;
-    res.status(201).json(data);
-  } catch (err) {
-    console.error('Error creating requisition:', err);
-    res.status(500).json({ error: err.message });
   }
 });
 // 3. Fetch all requisitions for Admin Desk
