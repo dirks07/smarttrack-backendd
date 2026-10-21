@@ -7,20 +7,21 @@ import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
-const cors = require('cors');
+const app = express();
 
+// Comprehensive CORS middleware & preflight handling
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization']
 }));
-
-// Explicit preflight handling
 app.options('*', cors());
+
+app.use(express.json());
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || ''
 );
 
 // Helper function to send emails via Brevo HTTPS REST API
@@ -59,10 +60,16 @@ async function sendVerificationEmail(recipientEmail, recipientName, activationUr
   return data;
 }
 
+// Health Check
 app.get('/', (req, res) => {
   res.send('SmartTrack API is live and operational.');
 });
 
+// ==========================================
+// AUTHENTICATION ROUTES
+// ==========================================
+
+// Register Admin or Borrower
 app.post('/api/auth/register', async (req, res) => {
   try {
     const {
@@ -87,7 +94,6 @@ app.post('/api/auth/register', async (req, res) => {
     const cleanEmail = email.trim().toLowerCase();
 
     if (role === 'admin') {
-      // Check if already registered
       const { data: existing } = await supabase
         .from('profiles')
         .select('id')
@@ -98,14 +104,13 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'An admin with this email already exists.' });
       }
 
-      // Insert directly into profiles table
       const { data, error } = await supabase
         .from('profiles')
         .insert([{
           full_name: resolvedName,
           staff_id: resolvedStaffId,
           email: cleanEmail,
-          password_hash: password, // plain text for testing
+          password_hash: password,
           department: resolvedDept,
           role: 'admin',
           is_verified: true
@@ -123,7 +128,6 @@ app.post('/api/auth/register', async (req, res) => {
         profile: data
       });
     } else {
-      // Borrower flow
       const { data: existing } = await supabase
         .from('borrowers')
         .select('id')
@@ -163,7 +167,182 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
-// 3. Fetch all requisitions for Admin Desk
+
+// Unified Login for Admin (profiles) and Mobile (borrowers)
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, identifier, staff_id, staffId, password } = req.body;
+    const loginIdent = (email || identifier || staff_id || staffId || '').trim().toLowerCase();
+
+    if (!loginIdent || !password) {
+      return res.status(400).json({ error: 'Identifier/email and password are required' });
+    }
+
+    // 1. Check profiles (Admins / Custodians)
+    const { data: adminUser } = await supabase
+      .from('profiles')
+      .select('*')
+      .or(`email.ilike.${loginIdent},staff_id.ilike.${loginIdent}`)
+      .maybeSingle();
+
+    if (adminUser) {
+      const storedHash = adminUser.password_hash || '';
+      let isValid = password === storedHash;
+      if (!isValid && storedHash.startsWith('$2')) {
+        isValid = await bcrypt.compare(password, storedHash);
+      }
+
+      if (isValid) {
+        const token = jwt.sign(
+          { id: adminUser.id, role: adminUser.role || 'admin', email: adminUser.email },
+          process.env.JWT_SECRET || 'smarttrack-secret-key',
+          { expiresIn: '7d' }
+        );
+        return res.json({
+          message: 'Admin login successful',
+          token,
+          user: adminUser,
+          profile: adminUser
+        });
+      }
+    }
+
+    // 2. Check borrowers (Students / Faculty)
+    const { data: borrowerUser } = await supabase
+      .from('borrowers')
+      .select('*')
+      .or(`email.ilike.${loginIdent},staff_id.ilike.${loginIdent}`)
+      .maybeSingle();
+
+    if (borrowerUser) {
+      const storedPass = borrowerUser.password || '';
+      let isValid = password === storedPass;
+      if (!isValid && storedPass.startsWith('$2')) {
+        isValid = await bcrypt.compare(password, storedPass);
+      }
+
+      if (isValid) {
+        const token = jwt.sign(
+          { id: borrowerUser.id, role: 'borrower', email: borrowerUser.email },
+          process.env.JWT_SECRET || 'smarttrack-secret-key',
+          { expiresIn: '7d' }
+        );
+        return res.json({
+          message: 'Borrower login successful',
+          token,
+          user: borrowerUser,
+          profile: borrowerUser
+        });
+      }
+    }
+
+    return res.status(401).json({ error: 'Invalid credentials. Please verify your email/ID and password.' });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error during login' });
+  }
+});
+
+// ==========================================
+// CATALOG & INVENTORY ROUTES (items table)
+// ==========================================
+
+// Get all equipment catalog items
+app.get('/api/catalog', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('items')
+      .select('*')
+      .order('name');
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('Error fetching catalog:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Restock or add equipment to catalog
+app.post('/api/catalog', async (req, res) => {
+  try {
+    const { sku, name, category, quantity } = req.body;
+    const qty = parseInt(quantity, 10) || 1;
+    const cleanSku = (sku || '').trim();
+
+    const { data: existing } = await supabase
+      .from('items')
+      .select('*')
+      .eq('sku', cleanSku)
+      .maybeSingle();
+
+    if (existing) {
+      const { data, error } = await supabase
+        .from('items')
+        .update({
+          total_quantity: Number(existing.total_quantity || 0) + qty,
+          available_quantity: Number(existing.available_quantity || 0) + qty,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return res.json(data);
+    } else {
+      const { data, error } = await supabase
+        .from('items')
+        .insert([{
+          sku: cleanSku,
+          name: (name || '').trim(),
+          category: category || 'Equipment',
+          total_quantity: qty,
+          available_quantity: qty
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+      return res.status(201).json(data);
+    }
+  } catch (err) {
+    console.error('Error restocking item:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// REQUISITION ROUTES
+// ==========================================
+
+// Submit requisition from Mobile App
+app.post('/api/requisitions', async (req, res) => {
+  try {
+    const { borrower_id, borrower_name, item_id, item_name, quantity } = req.body;
+
+    const { data, error } = await supabase
+      .from('requisitions')
+      .insert([{
+        borrower_id,
+        borrower_name: borrower_name || 'Borrower',
+        item_id,
+        item_name: item_name || 'Equipment',
+        quantity: parseInt(quantity, 10) || 1,
+        status: 'pending',
+        requested_at: new Date().toISOString()
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error('Error creating requisition:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch all requisitions for Admin Desk
 app.get('/api/requisitions', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -177,7 +356,7 @@ app.get('/api/requisitions', async (req, res) => {
   }
 });
 
-// 4. Update Requisition Status (Approve / Reject)
+// Update Requisition Status (Approve / Reject)
 app.patch('/api/requisitions/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -194,5 +373,6 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`SmartTrack Server active on port ${PORT}`));
