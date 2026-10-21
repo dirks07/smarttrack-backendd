@@ -65,42 +65,67 @@ app.get('/', (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { staff_id, full_name, email, password, department } = req.body;
+    const {
+      fullName,
+      full_name,
+      staffId,
+      staff_id,
+      email,
+      password,
+      department,
+      role = 'borrower'
+    } = req.body;
 
-    const { data, error } = await supabase
-      .from('borrowers')
-      .insert([
-        {
-          staff_id: staff_id.trim(),
-          full_name: full_name.trim(),
-          email: email.trim().toLowerCase(),
-          password: password, // stores plain text
-          department: department || 'General',
-          is_verified: true
-        }
-      ])
-      .select()
-      .single();
+    const resolvedName = fullName || full_name;
+    const resolvedStaffId = staffId || staff_id;
+    const resolvedDept = department || (role === 'admin' ? 'Property Custodian' : 'Student');
 
-    if (error) {
-      return res.status(400).json({ error: error.message });
+    if (!email || !password || !resolvedName) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
     }
 
-    return res.status(201).json({ message: 'Borrower registered successfully', user: data });
-  } catch (err) {
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-app.get('/api/auth/verify', async (req, res) => {
-  try {
-    const decoded = jwt.verify(req.query.token, process.env.JWT_SECRET || 'secret');
-    await supabase.from('profiles').update({ is_verified: true, verification_token: null }).eq('email', decoded.email);
-    res.send('<h2 style="font-family:sans-serif;text-align:center;margin-top:40px;color:#10b981;">Account successfully activated! You can now return to the workstation and sign in.</h2>');
-  } catch {
-    res.status(400).send('Invalid or expired verification link.');
-  }
-});
+    if (role === 'admin') {
+      // 1. Insert into profiles table
+      const { data, error } = await supabase
+        .from('profiles')
+        .insert([{
+          full_name: resolvedName,
+          staff_id: resolvedStaffId,
+          email: email.trim().toLowerCase(),
+          password_hash: password, // plain text
+          department: resolvedDept,
+          role: 'admin',
+          is_verified: true
+        }])
+        .select()
+        .single();
 
+      if (error) throw error;
+      return res.status(201).json({ message: 'Admin registered successfully', user: data });
+    } else {
+      // 2. Insert into borrowers table
+      const { data, error } = await supabase
+        .from('borrowers')
+        .insert([{
+          full_name: resolvedName,
+          staff_id: resolvedStaffId,
+          email: email.trim().toLowerCase(),
+          password: password, // plain text
+          department: resolvedDept,
+          role: 'borrower',
+          is_verified: true
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+      return res.status(201).json({ message: 'Borrower registered successfully', user: data });
+    }
+  } catch (err) {
+    console.error('Registration error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
 // 1. Fetch live catalog for both Mobile and Admin
 // 1. Fetch live catalog
 app.get('/api/catalog', async (req, res) => {
