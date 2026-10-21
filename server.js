@@ -96,7 +96,6 @@ app.get('/api/auth/verify', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    // Support all possible payload property names from the mobile app
     const identifier = req.body.identifier || req.body.email || req.body.staff_id;
     const password = req.body.password;
 
@@ -104,37 +103,54 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'ID/Email and password are required' });
     }
 
-    const cleanIdentifier = String(identifier).trim();
+    const cleanId = String(identifier).trim();
 
-    // Query borrowers table by staff_id or email
-    const { data: borrower, error } = await supabase
+    // 1. First check the borrowers table (for mobile app users)
+    let { data: user, error } = await supabase
       .from('borrowers')
       .select('*')
-      .or(`staff_id.eq.${cleanIdentifier},email.ilike.${cleanIdentifier}`)
-      .single();
+      .or(`staff_id.eq.${cleanId},email.ilike.${cleanId}`)
+      .maybeSingle();
 
-    if (error || !borrower) {
-      return res.status(404).json({ error: 'Borrower account not found' });
+    let role = 'borrower';
+
+    // 2. If not found in borrowers, check profiles table (for Admins / Custodians)
+    if (!user) {
+      const adminLookup = await supabase
+        .from('profiles')
+        .select('*')
+        .or(`staff_id.eq.${cleanId},email.ilike.${cleanId}`)
+        .maybeSingle();
+
+      if (adminLookup.data) {
+        user = adminLookup.data;
+        role = user.role || 'admin';
+      }
     }
 
-    // Direct plain-text password match
-    if (borrower.password !== password) {
+    if (!user) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+
+    // Direct plain-text password match (supports password or password_hash column)
+    const storedPassword = user.password || user.password_hash;
+    if (storedPassword !== password) {
       return res.status(401).json({ error: 'Invalid password' });
     }
 
-    if (borrower.is_verified === false) {
+    if (user.is_verified === false) {
       return res.status(403).json({ error: 'Account not yet verified' });
     }
 
     return res.status(200).json({
       message: 'Login successful',
       user: {
-        id: borrower.id,
-        staff_id: borrower.staff_id,
-        full_name: borrower.full_name,
-        email: borrower.email,
-        department: borrower.department,
-        role: 'borrower'
+        id: user.id,
+        staff_id: user.staff_id,
+        full_name: user.full_name,
+        email: user.email,
+        department: user.department,
+        role: role
       }
     });
   } catch (err) {
