@@ -10,12 +10,12 @@ dotenv.config();
 const app = express();
 
 // Comprehensive CORS middleware & preflight handling
+// Enable CORS for all routes (automatically handles OPTIONS preflights)
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization']
 }));
-app.options('*', cors());
 
 app.use(express.json());
 
