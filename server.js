@@ -103,19 +103,51 @@ app.get('/api/auth/verify', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const { data: user, error } = await supabase.from('profiles').select('*').eq('email', email.trim().toLowerCase()).single();
-    if (error || !user) return res.status(401).json({ error: 'User does not exist.' });
-    if (!user.is_verified) return res.status(403).json({ error: 'Account not activated. Please verify via email.' });
+    if (!email || !password) {
+      return res.status(400).json({ error: 'ID/Email and password required.' });
+    }
+
+    const cleanIdentifier = email.trim();
+
+    // Query profiles matching EITHER the email OR the staff_id
+    const { data: user, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .or(`email.ilike.${cleanIdentifier},staff_id.eq.${cleanIdentifier}`)
+      .maybeSingle();
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'User does not exist.' });
+    }
+
+    if (!user.is_verified) {
+      return res.status(403).json({ error: 'Account not activated. Please verify via email.' });
+    }
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid password.' });
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid password.' });
+    }
 
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' });
-    res.json({ token, profile: { fullName: user.full_name, staffId: user.staff_id, department: user.department } });
+    const token = jwt.sign(
+      { id: user.id, email: user.email, staffId: user.staff_id, role: user.role },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      token,
+      profile: {
+        fullName: user.full_name,
+        staffId: user.staff_id,
+        department: user.department,
+        email: user.email,
+        role: user.role,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`SmartTrack Server active on port ${PORT}`));
