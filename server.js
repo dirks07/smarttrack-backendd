@@ -9,8 +9,6 @@ dotenv.config();
 
 const app = express();
 
-// Comprehensive CORS middleware & preflight handling
-// Enable CORS for all routes (automatically handles OPTIONS preflights)
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -24,52 +22,14 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || ''
 );
 
-// Helper function to send emails via Brevo HTTPS REST API
-async function sendVerificationEmail(recipientEmail, recipientName, activationUrl) {
-  const apiKey = process.env.BREVO_API_KEY;
-  if (!apiKey) throw new Error('BREVO_API_KEY is missing');
-
-  const senderEmail = process.env.SENDER_EMAIL || 'dirkshaned@gmail.com';
-
-  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
-    method: 'POST',
-    headers: {
-      'accept': 'application/json',
-      'api-key': apiKey,
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({
-      sender: { name: 'CDM SmartTrack', email: senderEmail },
-      to: [{ email: recipientEmail, name: recipientName }],
-      subject: 'Activate Your CDM SmartTrack Account',
-      htmlContent: `
-        <div style="background:#060a0f;color:#fff;padding:24px;text-align:center;font-family:sans-serif;border-radius:12px;">
-          <h2 style="color:#10b981;letter-spacing:1px;">CDM SMARTTRACK</h2>
-          <p style="color:#cbd5e1;">Hello ${recipientName}, click below to activate your account:</p>
-          <a href="${activationUrl}" style="background:#10b981;color:#022c22;padding:12px 24px;text-decoration:none;font-weight:bold;display:inline-block;border-radius:6px;margin:20px 0;">Activate My Account</a>
-          <p style="color:#64748b;font-size:12px;">This link will expire in 15 minutes.</p>
-        </div>
-      `
-    })
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.message || 'Brevo API error sending email');
-  }
-  return data;
-}
-
-// Health Check
+// Health check
 app.get('/', (req, res) => {
   res.send('SmartTrack API is live and operational.');
 });
 
 // ==========================================
-// AUTHENTICATION ROUTES
+// 1. REGISTRATION (Admin & Borrower)
 // ==========================================
-
-// Register Admin or Borrower
 app.post('/api/auth/register', async (req, res) => {
   try {
     const {
@@ -83,34 +43,38 @@ app.post('/api/auth/register', async (req, res) => {
       role = 'admin'
     } = req.body;
 
-    const resolvedName = fullName || full_name;
-    const resolvedStaffId = staffId || staff_id;
+    const resolvedName = (fullName || full_name || '').trim();
+    const resolvedStaffId = (staffId || staff_id || '').trim();
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const cleanPassword = (password || '').trim();
     const resolvedDept = department || (role === 'admin' ? 'Property Custodian' : 'Student');
 
-    if (!email || !password || !resolvedName) {
+    if (!cleanEmail || !cleanPassword || !resolvedName) {
       return res.status(400).json({ error: 'Name, email, and password are required' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-
     if (role === 'admin') {
+      // Check if email or staff_id already exists in profiles
       const { data: existing } = await supabase
         .from('profiles')
-        .select('id')
-        .eq('email', cleanEmail)
+        .select('id, email, staff_id')
+        .or(`email.ilike.${cleanEmail}${resolvedStaffId ? `,staff_id.eq.${resolvedStaffId}` : ''}`)
         .maybeSingle();
 
       if (existing) {
-        return res.status(400).json({ error: 'An admin with this email already exists.' });
+        if (existing.email.toLowerCase() === cleanEmail) {
+          return res.status(400).json({ error: 'An admin with this email is already registered. Please sign in.' });
+        }
+        return res.status(400).json({ error: `Staff ID "${resolvedStaffId}" is already registered. Use a different ID or sign in.` });
       }
 
       const { data, error } = await supabase
         .from('profiles')
         .insert([{
           full_name: resolvedName,
-          staff_id: resolvedStaffId,
+          staff_id: resolvedStaffId || null,
           email: cleanEmail,
-          password_hash: password,
+          password_hash: cleanPassword,
           department: resolvedDept,
           role: 'admin',
           is_verified: true
@@ -118,67 +82,60 @@ app.post('/api/auth/register', async (req, res) => {
         .select()
         .single();
 
-      if (error) {
-        console.error('Supabase profile insert error:', error);
-        return res.status(500).json({ error: error.message });
-      }
+      if (error) throw error;
+      return res.status(201).json({ message: 'Admin registered successfully!', profile: data });
 
-      return res.status(201).json({
-        message: 'Admin registered and activated successfully!',
-        profile: data
-      });
     } else {
+      // Borrower flow
       const { data: existing } = await supabase
         .from('borrowers')
-        .select('id')
-        .eq('email', cleanEmail)
+        .select('id, email, staff_id')
+        .or(`email.ilike.${cleanEmail}${resolvedStaffId ? `,staff_id.eq.${resolvedStaffId}` : ''}`)
         .maybeSingle();
 
       if (existing) {
-        return res.status(400).json({ error: 'A borrower with this email already exists.' });
+        return res.status(400).json({ error: 'A borrower with this email or ID is already registered. Please sign in.' });
       }
+
+      // Insert without relying on 'role' column to prevent PostgREST cache issues
+      const insertPayload = {
+        full_name: resolvedName,
+        email: cleanEmail,
+        password: cleanPassword,
+        department: resolvedDept,
+        is_verified: true
+      };
+      if (resolvedStaffId) insertPayload.staff_id = resolvedStaffId;
 
       const { data, error } = await supabase
         .from('borrowers')
-        .insert([{
-          full_name: resolvedName,
-          staff_id: resolvedStaffId,
-          email: cleanEmail,
-          password: password,
-          department: resolvedDept,
-          role: 'borrower',
-          is_verified: true
-        }])
+        .insert([insertPayload])
         .select()
         .single();
 
-      if (error) {
-        console.error('Supabase borrower insert error:', error);
-        return res.status(500).json({ error: error.message });
-      }
-
-      return res.status(201).json({
-        message: 'Borrower registered successfully!',
-        user: data
-      });
+      if (error) throw error;
+      return res.status(201).json({ message: 'Borrower registered successfully!', user: data });
     }
   } catch (err) {
-    console.error('Critical Register Handler Error:', err);
+    console.error('Registration handler error:', err);
     return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// Unified Login for Admin (profiles) and Mobile (borrowers)
+// ==========================================
+// 2. UNIFIED LOGIN (Admin & Borrower)
+// ==========================================
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, identifier, staff_id, staffId, password } = req.body;
     const loginIdent = (email || identifier || staff_id || staffId || '').trim().toLowerCase();
+    const cleanPassword = (password || '').trim();
 
-    if (!loginIdent || !password) {
+    if (!loginIdent || !cleanPassword) {
       return res.status(400).json({ error: 'Identifier/email and password are required' });
     }
 
-    // 1. Check profiles (Admins / Custodians)
+    // 1. Check profiles (Admin)
     const { data: adminUser } = await supabase
       .from('profiles')
       .select('*')
@@ -187,9 +144,9 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (adminUser) {
       const storedHash = adminUser.password_hash || '';
-      let isValid = password === storedHash;
+      let isValid = cleanPassword === storedHash;
       if (!isValid && storedHash.startsWith('$2')) {
-        isValid = await bcrypt.compare(password, storedHash);
+        isValid = await bcrypt.compare(cleanPassword, storedHash);
       }
 
       if (isValid) {
@@ -207,7 +164,7 @@ app.post('/api/auth/login', async (req, res) => {
       }
     }
 
-    // 2. Check borrowers (Students / Faculty)
+    // 2. Check borrowers
     const { data: borrowerUser } = await supabase
       .from('borrowers')
       .select('*')
@@ -216,9 +173,9 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (borrowerUser) {
       const storedPass = borrowerUser.password || '';
-      let isValid = password === storedPass;
+      let isValid = cleanPassword === storedPass;
       if (!isValid && storedPass.startsWith('$2')) {
-        isValid = await bcrypt.compare(password, storedPass);
+        isValid = await bcrypt.compare(cleanPassword, storedPass);
       }
 
       if (isValid) {
@@ -244,10 +201,8 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // ==========================================
-// CATALOG & INVENTORY ROUTES (items table)
+// 3. CATALOG & RESTOCK (items table)
 // ==========================================
-
-// Get all equipment catalog items
 app.get('/api/catalog', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -257,12 +212,10 @@ app.get('/api/catalog', async (req, res) => {
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
-    console.error('Error fetching catalog:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Restock or add equipment to catalog
 app.post('/api/catalog', async (req, res) => {
   try {
     const { sku, name, category, quantity } = req.body;
@@ -306,28 +259,30 @@ app.post('/api/catalog', async (req, res) => {
       return res.status(201).json(data);
     }
   } catch (err) {
-    console.error('Error restocking item:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ==========================================
-// REQUISITION ROUTES
+// 4. REQUISITIONS (Borrower Request -> Admin Desk)
 // ==========================================
-
-// Submit requisition from Mobile App
+// Create requisition (Handles both camelCase and snake_case from Mobile)
 app.post('/api/requisitions', async (req, res) => {
   try {
-    const { borrower_id, borrower_name, item_id, item_name, quantity } = req.body;
+    const bId = req.body.borrower_id || req.body.borrowerId || null;
+    const bName = req.body.borrower_name || req.body.borrowerName || 'Borrower';
+    const iId = req.body.item_id || req.body.itemId || null;
+    const iName = req.body.item_name || req.body.itemName || req.body.equipmentName || 'Equipment Item';
+    const qty = parseInt(req.body.quantity, 10) || 1;
 
     const { data, error } = await supabase
       .from('requisitions')
       .insert([{
-        borrower_id,
-        borrower_name: borrower_name || 'Borrower',
-        item_id,
-        item_name: item_name || 'Equipment',
-        quantity: parseInt(quantity, 10) || 1,
+        borrower_id: bId,
+        borrower_name: bName,
+        item_id: iId,
+        item_name: iName,
+        quantity: qty,
         status: 'pending',
         requested_at: new Date().toISOString()
       }])
@@ -337,7 +292,7 @@ app.post('/api/requisitions', async (req, res) => {
     if (error) throw error;
     res.status(201).json(data);
   } catch (err) {
-    console.error('Error creating requisition:', err);
+    console.error('Requisition submission error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -349,6 +304,7 @@ app.get('/api/requisitions', async (req, res) => {
       .from('requisitions')
       .select('*')
       .order('requested_at', { ascending: false });
+
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
@@ -356,17 +312,26 @@ app.get('/api/requisitions', async (req, res) => {
   }
 });
 
-// Update Requisition Status (Approve / Reject)
+// Admin Approve / Reject / Return status update
 app.patch('/api/requisitions/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+
+    const updatePayload = { status: status.toLowerCase() };
+    if (status.toLowerCase() === 'claimed' || status.toLowerCase() === 'approved') {
+      updatePayload.dispatched_at = new Date().toISOString();
+    } else if (status.toLowerCase() === 'returned') {
+      updatePayload.returned_at = new Date().toISOString();
+    }
+
     const { data, error } = await supabase
       .from('requisitions')
-      .update({ status })
+      .update(updatePayload)
       .eq('id', id)
       .select()
       .single();
+
     if (error) throw error;
     res.json(data);
   } catch (err) {
