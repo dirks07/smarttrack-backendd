@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { Resend } from 'resend';
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -17,7 +16,41 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Helper function to send emails via Brevo HTTPS REST API
+async function sendVerificationEmail(recipientEmail, recipientName, activationUrl) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) throw new Error('BREVO_API_KEY is missing');
+
+  const senderEmail = process.env.SENDER_EMAIL || 'dirkshaned@gmail.com';
+
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': apiKey,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      sender: { name: 'CDM SmartTrack', email: senderEmail },
+      to: [{ email: recipientEmail, name: recipientName }],
+      subject: 'Activate Your CDM SmartTrack Account',
+      htmlContent: `
+        <div style="background:#060a0f;color:#fff;padding:24px;text-align:center;font-family:sans-serif;border-radius:12px;">
+          <h2 style="color:#10b981;letter-spacing:1px;">CDM SMARTTRACK</h2>
+          <p style="color:#cbd5e1;">Hello ${recipientName}, click below to activate your account:</p>
+          <a href="${activationUrl}" style="background:#10b981;color:#022c22;padding:12px 24px;text-decoration:none;font-weight:bold;display:inline-block;border-radius:6px;margin:20px 0;">Activate My Account</a>
+          <p style="color:#64748b;font-size:12px;">This link will expire in 15 minutes.</p>
+        </div>
+      `
+    })
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || 'Brevo API error sending email');
+  }
+  return data;
+}
 
 app.get('/', (req, res) => {
   res.send('SmartTrack API is live and operational.');
@@ -47,26 +80,9 @@ app.post('/api/auth/register', async (req, res) => {
     const baseUrl = process.env.APP_URL || 'https://smarttrack-backendd.onrender.com';
     const activationUrl = `${baseUrl}/api/auth/verify?token=${verificationToken}`;
 
-    const { error: sendError } = await resend.emails.send({
-      from: 'CDM SmartTrack <onboarding@resend.dev>',
-      to: cleanEmail,
-      subject: 'Activate Your CDM SmartTrack Account',
-      html: `
-        <div style="background:#060a0f;color:#fff;padding:24px;text-align:center;font-family:sans-serif;">
-          <h2>CDM SMARTTRACK</h2>
-          <p>Hello ${fullName}, click below to activate your admin account:</p>
-          <a href="${activationUrl}" style="background:#10b981;color:#000;padding:12px 24px;text-decoration:none;font-weight:bold;display:inline-block;border-radius:6px;margin:16px 0;">Activate My Account</a>
-          <p style="color:#64748b;font-size:12px;">Link expires in 15 minutes.</p>
-        </div>
-      `
-    });
+    await sendVerificationEmail(cleanEmail, fullName.trim(), activationUrl);
 
-    if (sendError) {
-      console.error('Resend Error:', sendError);
-      return res.status(500).json({ error: sendError.message });
-    }
-
-    console.log(`[Email Dispatched via Resend] Activation sent to: ${cleanEmail}`);
+    console.log(`[Email Dispatched via Brevo] Activation sent to: ${cleanEmail}`);
     res.status(201).json({ success: true, message: `Email dispatched to ${cleanEmail}` });
   } catch (err) {
     console.error('Registration failed:', err);
