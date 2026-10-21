@@ -158,6 +158,32 @@ app.post('/api/catalog', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// Submit Requisition from Mobile App
+app.post('/api/requisitions', async (req, res) => {
+  try {
+    const { borrower_id, borrower_name, item_id, item_name, quantity } = req.body;
+
+    const { data, error } = await supabase
+      .from('requisitions')
+      .insert([{
+        borrower_id,
+        borrower_name,
+        item_id,
+        item_name,
+        quantity: parseInt(quantity, 10) || 1,
+        status: 'pending',
+        requested_at: new Date().toISOString()
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error('Error creating requisition:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 // 3. Fetch all requisitions for Admin Desk
 app.get('/api/requisitions', async (req, res) => {
   try {
