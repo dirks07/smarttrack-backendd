@@ -96,15 +96,17 @@ app.get('/api/auth/verify', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { identifier, password } = req.body; // identifier can be staff_id or email
+    // Support all possible payload property names from the mobile app
+    const identifier = req.body.identifier || req.body.email || req.body.staff_id;
+    const password = req.body.password;
 
     if (!identifier || !password) {
       return res.status(400).json({ error: 'ID/Email and password are required' });
     }
 
-    const cleanIdentifier = identifier.trim();
+    const cleanIdentifier = String(identifier).trim();
 
-    // Query dedicated borrowers table
+    // Query borrowers table by staff_id or email
     const { data: borrower, error } = await supabase
       .from('borrowers')
       .select('*')
@@ -120,12 +122,10 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid password' });
     }
 
-    // Check account status
     if (borrower.is_verified === false) {
       return res.status(403).json({ error: 'Account not yet verified' });
     }
 
-    // Return sanitized borrower session object
     return res.status(200).json({
       message: 'Login successful',
       user: {
