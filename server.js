@@ -17,14 +17,33 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
+// Cloud-optimized SMTP connection with port 587 and fallback timeouts
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT) || 465,
-  secure: true,
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: false, // TLS via STARTTLS
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  tls: {
+    rejectUnauthorized: false
+  },
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 15000
+});
+
+transporter.verify((error) => {
+  if (error) {
+    console.error('SMTP Connection Warning:', error.message);
+  } else {
+    console.log('Nodemailer SMTP Service is ready to send emails.');
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('SmartTrack API is live and operational.');
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -48,7 +67,8 @@ app.post('/api/auth/register', async (req, res) => {
       verification_token: verificationToken,
     }, { onConflict: 'email' });
 
-    const activationUrl = `${process.env.APP_URL || 'http://localhost:5000'}/api/auth/verify?token=${verificationToken}`;
+    const baseUrl = process.env.APP_URL || 'https://smarttrack-backendd.onrender.com';
+    const activationUrl = `${baseUrl}/api/auth/verify?token=${verificationToken}`;
 
     await transporter.sendMail({
       from: `"CDM SmartTrack" <${process.env.SMTP_USER}>`,
@@ -99,4 +119,4 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`SmartTrack Server active at http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`SmartTrack Server active on port ${PORT}`));
