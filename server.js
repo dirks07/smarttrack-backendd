@@ -102,9 +102,13 @@ app.get('/api/auth/verify', async (req, res) => {
 });
 
 // 1. Fetch live catalog for both Mobile and Admin
+// 1. Fetch live catalog
 app.get('/api/catalog', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('equipment').select('*').order('name');
+    const { data, error } = await supabase
+      .from('items') // Change to 'items' or 'equipment_catalog'
+      .select('*')
+      .order('name');
     if (error) throw error;
     res.json(data || []);
   } catch (err) {
@@ -112,21 +116,20 @@ app.get('/api/catalog', async (req, res) => {
   }
 });
 
-// 2. Restock / Create equipment from Admin Workstation
+// 2. Restock endpoint
 app.post('/api/catalog', async (req, res) => {
   try {
     const { sku, name, category, quantity } = req.body;
     
-    // Check if equipment already exists by SKU
     const { data: existing } = await supabase
-      .from('equipment')
+      .from('items') // Match table name
       .select('*')
       .eq('sku', sku)
       .maybeSingle();
 
     if (existing) {
       const { data, error } = await supabase
-        .from('equipment')
+        .from('items')
         .update({
           total_quantity: Number(existing.total_quantity || 0) + Number(quantity),
           available_quantity: Number(existing.available_quantity || 0) + Number(quantity)
@@ -138,7 +141,7 @@ app.post('/api/catalog', async (req, res) => {
       return res.json(data);
     } else {
       const { data, error } = await supabase
-        .from('equipment')
+        .from('items')
         .insert([{
           sku,
           name,
@@ -155,7 +158,6 @@ app.post('/api/catalog', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // 3. Fetch all requisitions for Admin Desk
 app.get('/api/requisitions', async (req, res) => {
   try {
