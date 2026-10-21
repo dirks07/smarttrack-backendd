@@ -58,38 +58,32 @@ app.get('/', (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { fullName, staffId, department, email, password } = req.body;
-    if (!email || !password || !fullName) {
-      return res.status(400).json({ error: 'All fields required' });
+    const { staff_id, full_name, email, password, department } = req.body;
+
+    const { data, error } = await supabase
+      .from('borrowers')
+      .insert([
+        {
+          staff_id: staff_id.trim(),
+          full_name: full_name.trim(),
+          email: email.trim().toLowerCase(),
+          password: password, // stores plain text
+          department: department || 'General',
+          is_verified: true
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
     }
-    const cleanEmail = email.trim().toLowerCase();
-    const passwordHash = await bcrypt.hash(password, 10);
-    const verificationToken = jwt.sign({ email: cleanEmail }, process.env.JWT_SECRET || 'secret', { expiresIn: '15m' });
 
-    await supabase.from('profiles').upsert({
-      full_name: fullName.trim(),
-      staff_id: staffId || null,
-      department: department || 'Property Custodian',
-      email: cleanEmail,
-      password_hash: passwordHash,
-      role: 'admin',
-      is_verified: false,
-      verification_token: verificationToken,
-    }, { onConflict: 'email' });
-
-    const baseUrl = process.env.APP_URL || 'https://smarttrack-backendd.onrender.com';
-    const activationUrl = `${baseUrl}/api/auth/verify?token=${verificationToken}`;
-
-    await sendVerificationEmail(cleanEmail, fullName.trim(), activationUrl);
-
-    console.log(`[Email Dispatched via Brevo] Activation sent to: ${cleanEmail}`);
-    res.status(201).json({ success: true, message: `Email dispatched to ${cleanEmail}` });
+    return res.status(201).json({ message: 'Borrower registered successfully', user: data });
   } catch (err) {
-    console.error('Registration failed:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
-
 app.get('/api/auth/verify', async (req, res) => {
   try {
     const decoded = jwt.verify(req.query.token, process.env.JWT_SECRET || 'secret');
@@ -102,51 +96,50 @@ app.get('/api/auth/verify', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'ID/Email and password required.' });
+    const { identifier, password } = req.body; // identifier can be staff_id or email
+
+    if (!identifier || !password) {
+      return res.status(400).json({ error: 'ID/Email and password are required' });
     }
 
-    const cleanIdentifier = email.trim();
+    const cleanIdentifier = identifier.trim();
 
-    // Query profiles matching EITHER the email OR the staff_id
-    const { data: user, error } = await supabase
-      .from('profiles')
+    // Query dedicated borrowers table
+    const { data: borrower, error } = await supabase
+      .from('borrowers')
       .select('*')
-      .or(`email.ilike.${cleanIdentifier},staff_id.eq.${cleanIdentifier}`)
-      .maybeSingle();
+      .or(`staff_id.eq.${cleanIdentifier},email.ilike.${cleanIdentifier}`)
+      .single();
 
-    if (error || !user) {
-      return res.status(401).json({ error: 'User does not exist.' });
+    if (error || !borrower) {
+      return res.status(404).json({ error: 'Borrower account not found' });
     }
 
-    if (!user.is_verified) {
-      return res.status(403).json({ error: 'Account not activated. Please verify via email.' });
+    // Direct plain-text password match
+    if (borrower.password !== password) {
+      return res.status(401).json({ error: 'Invalid password' });
     }
 
-   // Plain text comparison:
-if (user.password_hash !== password) {
-  return res.status(401).json({ error: 'Invalid password' });
-}
+    // Check account status
+    if (borrower.is_verified === false) {
+      return res.status(403).json({ error: 'Account not yet verified' });
+    }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, staffId: user.staff_id, role: user.role },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '7d' }
-    );
-
-    res.json({
-      token,
-      profile: {
-        fullName: user.full_name,
-        staffId: user.staff_id,
-        department: user.department,
-        email: user.email,
-        role: user.role,
-      },
+    // Return sanitized borrower session object
+    return res.status(200).json({
+      message: 'Login successful',
+      user: {
+        id: borrower.id,
+        staff_id: borrower.staff_id,
+        full_name: borrower.full_name,
+        email: borrower.email,
+        department: borrower.department,
+        role: 'borrower'
+      }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 const PORT = process.env.PORT || 5000;
