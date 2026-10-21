@@ -124,10 +124,10 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(403).json({ error: 'Account not activated. Please verify via email.' });
     }
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid password.' });
-    }
+   // Plain text comparison:
+if (user.password_hash !== password) {
+  return res.status(401).json({ error: 'Invalid password' });
+}
 
     const token = jwt.sign(
       { id: user.id, email: user.email, staffId: user.staff_id, role: user.role },
