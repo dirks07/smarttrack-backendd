@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -17,30 +17,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-// Cloud-optimized SMTP connection with port 587 and fallback timeouts
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false, // TLS via STARTTLS
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false
-  },
-  connectionTimeout: 15000,
-  greetingTimeout: 15000,
-  socketTimeout: 15000
-});
-
-transporter.verify((error) => {
-  if (error) {
-    console.error('SMTP Connection Warning:', error.message);
-  } else {
-    console.log('Nodemailer SMTP Service is ready to send emails.');
-  }
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 app.get('/', (req, res) => {
   res.send('SmartTrack API is live and operational.');
@@ -70,20 +47,26 @@ app.post('/api/auth/register', async (req, res) => {
     const baseUrl = process.env.APP_URL || 'https://smarttrack-backendd.onrender.com';
     const activationUrl = `${baseUrl}/api/auth/verify?token=${verificationToken}`;
 
-    await transporter.sendMail({
-      from: `"CDM SmartTrack" <${process.env.SMTP_USER}>`,
+    const { error: sendError } = await resend.emails.send({
+      from: 'CDM SmartTrack <onboarding@resend.dev>',
       to: cleanEmail,
       subject: 'Activate Your CDM SmartTrack Account',
       html: `
         <div style="background:#060a0f;color:#fff;padding:24px;text-align:center;font-family:sans-serif;">
           <h2>CDM SMARTTRACK</h2>
-          <p>Hello ${fullName}, click below to activate your account:</p>
+          <p>Hello ${fullName}, click below to activate your admin account:</p>
           <a href="${activationUrl}" style="background:#10b981;color:#000;padding:12px 24px;text-decoration:none;font-weight:bold;display:inline-block;border-radius:6px;margin:16px 0;">Activate My Account</a>
+          <p style="color:#64748b;font-size:12px;">Link expires in 15 minutes.</p>
         </div>
       `
     });
 
-    console.log(`[Email Sent] Activation sent to: ${cleanEmail}`);
+    if (sendError) {
+      console.error('Resend Error:', sendError);
+      return res.status(500).json({ error: sendError.message });
+    }
+
+    console.log(`[Email Dispatched via Resend] Activation sent to: ${cleanEmail}`);
     res.status(201).json({ success: true, message: `Email dispatched to ${cleanEmail}` });
   } catch (err) {
     console.error('Registration failed:', err);
@@ -95,7 +78,7 @@ app.get('/api/auth/verify', async (req, res) => {
   try {
     const decoded = jwt.verify(req.query.token, process.env.JWT_SECRET || 'secret');
     await supabase.from('profiles').update({ is_verified: true, verification_token: null }).eq('email', decoded.email);
-    res.send('<h2 style="font-family:sans-serif;text-align:center;margin-top:40px;">Account successfully activated! You can now sign in.</h2>');
+    res.send('<h2 style="font-family:sans-serif;text-align:center;margin-top:40px;color:#10b981;">Account successfully activated! You can now return to the workstation and sign in.</h2>');
   } catch {
     res.status(400).send('Invalid or expired verification link.');
   }
