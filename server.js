@@ -7,9 +7,16 @@ import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const cors = require('cors');
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Explicit preflight handling
+app.options('*', cors());
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -94,68 +101,90 @@ app.get('/api/auth/verify', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+// 1. Fetch live catalog for both Mobile and Admin
+app.get('/api/catalog', async (req, res) => {
   try {
-    const identifier = req.body.identifier || req.body.email || req.body.staff_id;
-    const password = req.body.password;
+    const { data, error } = await supabase.from('equipment').select('*').order('name');
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    if (!identifier || !password) {
-      return res.status(400).json({ error: 'ID/Email and password are required' });
-    }
-
-    const cleanId = String(identifier).trim();
-
-    // 1. First check the borrowers table (for mobile app users)
-    let { data: user, error } = await supabase
-      .from('borrowers')
+// 2. Restock / Create equipment from Admin Workstation
+app.post('/api/catalog', async (req, res) => {
+  try {
+    const { sku, name, category, quantity } = req.body;
+    
+    // Check if equipment already exists by SKU
+    const { data: existing } = await supabase
+      .from('equipment')
       .select('*')
-      .or(`staff_id.eq.${cleanId},email.ilike.${cleanId}`)
+      .eq('sku', sku)
       .maybeSingle();
 
-    let role = 'borrower';
-
-    // 2. If not found in borrowers, check profiles table (for Admins / Custodians)
-    if (!user) {
-      const adminLookup = await supabase
-        .from('profiles')
-        .select('*')
-        .or(`staff_id.eq.${cleanId},email.ilike.${cleanId}`)
-        .maybeSingle();
-
-      if (adminLookup.data) {
-        user = adminLookup.data;
-        role = user.role || 'admin';
-      }
+    if (existing) {
+      const { data, error } = await supabase
+        .from('equipment')
+        .update({
+          total_quantity: Number(existing.total_quantity || 0) + Number(quantity),
+          available_quantity: Number(existing.available_quantity || 0) + Number(quantity)
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+      if (error) throw error;
+      return res.json(data);
+    } else {
+      const { data, error } = await supabase
+        .from('equipment')
+        .insert([{
+          sku,
+          name,
+          category,
+          total_quantity: Number(quantity),
+          available_quantity: Number(quantity)
+        }])
+        .select()
+        .single();
+      if (error) throw error;
+      return res.json(data);
     }
-
-    if (!user) {
-      return res.status(404).json({ error: 'Account not found' });
-    }
-
-    // Direct plain-text password match (supports password or password_hash column)
-    const storedPassword = user.password || user.password_hash;
-    if (storedPassword !== password) {
-      return res.status(401).json({ error: 'Invalid password' });
-    }
-
-    if (user.is_verified === false) {
-      return res.status(403).json({ error: 'Account not yet verified' });
-    }
-
-    return res.status(200).json({
-      message: 'Login successful',
-      user: {
-        id: user.id,
-        staff_id: user.staff_id,
-        full_name: user.full_name,
-        email: user.email,
-        department: user.department,
-        role: role
-      }
-    });
   } catch (err) {
-    console.error('Login error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Fetch all requisitions for Admin Desk
+app.get('/api/requisitions', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('requisitions')
+      .select('*')
+      .order('requested_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Update Requisition Status (Approve / Reject)
+app.patch('/api/requisitions/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const { data, error } = await supabase
+      .from('requisitions')
+      .update({ status })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 const PORT = process.env.PORT || 5000;
