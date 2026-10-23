@@ -428,7 +428,7 @@ app.post('/api/requisitions', async (req, res) => {
 
     if (error) {
       console.error('Supabase Requisition Insert Error:', error);
-      throw error;
+      return res.status(500).json({ error: error.message });
     }
 
     res.status(201).json(data);
@@ -486,6 +486,7 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
       updatePayload.returned_at = new Date().toISOString();
     }
 
+    // 1. Update the requisition status
     const { data, error } = await supabase
       .from('requisitions')
       .update(updatePayload)
@@ -493,28 +494,47 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
-
-    if (data && data.item_name) {
-      if (status === 'claimed') {
-        const { data: itemData } = await supabase.from('items').select('*').eq('name', data.item_name).single();
-        if (itemData) {
-          const newQty = Math.max(0, itemData.available_quantity - (data.quantity || 1));
-          await supabase.from('items').update({ available_quantity: newQty }).eq('id', itemData.id);
-        }
-      } else if (status === 'returned') {
-        const { data: itemData } = await supabase.from('items').select('*').eq('name', data.item_name).single();
-        if (itemData) {
-          const newQty = Math.min(itemData.total_quantity, itemData.available_quantity + (data.quantity || 1));
-          await supabase.from('items').update({ available_quantity: newQty }).eq('id', itemData.id);
-        }
-      }
+    if (error) {
+      console.error('Requisition status update error:', error);
+      return res.status(500).json({ error: error.message });
     }
 
-    res.json(data);
+    // 2. Adjust item quantity safely without breaking the dispatch flow
+    try {
+      if (data && data.item_name) {
+        const { data: itemData } = await supabase
+          .from('items')
+          .select('*')
+          .ilike('name', data.item_name.trim())
+          .maybeSingle();
+
+        if (itemData) {
+          const qtyDelta = parseInt(data.quantity, 10) || 1;
+          let newQty = itemData.available_quantity;
+
+          if (status === 'claimed') {
+            newQty = Math.max(0, Number(itemData.available_quantity || 0) - qtyDelta);
+          } else if (status === 'returned') {
+            newQty = Math.min(
+              Number(itemData.total_quantity || 0),
+              Number(itemData.available_quantity || 0) + qtyDelta
+            );
+          }
+
+          await supabase
+            .from('items')
+            .update({ available_quantity: newQty })
+            .eq('id', itemData.id);
+        }
+      }
+    } catch (stockErr) {
+      console.warn('Inventory quantity adjust warning (non-fatal):', stockErr.message);
+    }
+
+    return res.json(data);
   } catch (err) {
-    console.error('Status update error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Patch status fatal error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
