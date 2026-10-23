@@ -212,7 +212,7 @@ app.get('/api/auth/activate', async (req, res) => {
     const { error } = await supabase
       .from(table)
       .update({ is_verified: true })
-      .eq('id', decoded.id);
+      .filter('id', 'eq', decoded.id);
 
     if (error) throw error;
 
@@ -232,7 +232,7 @@ app.get('/api/auth/activate', async (req, res) => {
   }
 });
 
-// Login (Enforces is_verified check)
+// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, identifier, staff_id, staffId, password } = req.body;
@@ -361,7 +361,7 @@ app.post('/api/catalog', async (req, res) => {
           available_quantity: Number(existing.available_quantity || 0) + qty,
           updated_at: new Date().toISOString()
         })
-        .eq('id', existing.id)
+        .filter('id', 'eq', existing.id)
         .select()
         .single();
 
@@ -477,7 +477,7 @@ app.get('/api/requisitions/borrower/:identifier', async (req, res) => {
 app.patch('/api/requisitions/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body; // 'approved', 'rejected', 'claimed', 'returned'
 
     const updatePayload = { status };
     if (status === 'claimed') {
@@ -486,11 +486,11 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
       updatePayload.returned_at = new Date().toISOString();
     }
 
-    // 1. Update the requisition status
+    // 1. Update status using filter to avoid implicit cast issues
     const { data, error } = await supabase
       .from('requisitions')
       .update(updatePayload)
-      .eq('id', id)
+      .filter('id', 'eq', id)
       .select()
       .single();
 
@@ -499,7 +499,7 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    // 2. Adjust item quantity safely without breaking the dispatch flow
+    // 2. Adjust catalog stock counts safely
     try {
       if (data && data.item_name) {
         const { data: itemData } = await supabase
@@ -524,7 +524,7 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
           await supabase
             .from('items')
             .update({ available_quantity: newQty })
-            .eq('id', itemData.id);
+            .filter('id', 'eq', itemData.id);
         }
       }
     } catch (stockErr) {
@@ -533,8 +533,8 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
 
     return res.json(data);
   } catch (err) {
-    console.error('Patch status fatal error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('Status update error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
