@@ -331,7 +331,8 @@ app.get('/api/catalog', async (req, res) => {
       ...item,
       title: item.name,
       equipmentName: item.name,
-      available: item.available_quantity,
+      available: item.available_quantity ?? item.availability ?? 0,
+      available_quantity: item.available_quantity ?? item.availability ?? 0,
       total: item.total_quantity
     }));
     res.json(normalized);
@@ -354,13 +355,16 @@ app.post('/api/catalog', async (req, res) => {
       .maybeSingle();
 
     if (existing) {
+      const currentAvail = Number(existing.available_quantity ?? existing.availability ?? 0);
+      const updatePayload = {
+        total_quantity: Number(existing.total_quantity || 0) + qty,
+        available_quantity: currentAvail + qty,
+        updated_at: new Date().toISOString()
+      };
+
       const { data, error } = await supabase
         .from('items')
-        .update({
-          total_quantity: Number(existing.total_quantity || 0) + qty,
-          available_quantity: Number(existing.available_quantity || 0) + qty,
-          updated_at: new Date().toISOString()
-        })
+        .update(updatePayload)
         .filter('id', 'eq', existing.id)
         .select()
         .single();
@@ -368,15 +372,17 @@ app.post('/api/catalog', async (req, res) => {
       if (error) throw error;
       return res.json(data);
     } else {
+      const insertPayload = {
+        sku: cleanSku,
+        name: (name || '').trim(),
+        category: category || 'Equipment',
+        total_quantity: qty,
+        available_quantity: qty
+      };
+
       const { data, error } = await supabase
         .from('items')
-        .insert([{
-          sku: cleanSku,
-          name: (name || '').trim(),
-          category: category || 'Equipment',
-          total_quantity: qty,
-          available_quantity: qty
-        }])
+        .insert([insertPayload])
         .select()
         .single();
 
@@ -486,7 +492,7 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
       updatePayload.returned_at = new Date().toISOString();
     }
 
-    // 1. Update status using filter to avoid implicit cast issues
+    // 1. Update the requisition status safely
     const { data, error } = await supabase
       .from('requisitions')
       .update(updatePayload)
@@ -510,21 +516,31 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
 
         if (itemData) {
           const qtyDelta = parseInt(data.quantity, 10) || 1;
-          let newQty = itemData.available_quantity;
+          const currentAvail = Number(itemData.available_quantity ?? itemData.availability ?? 0);
+          let newQty = currentAvail;
 
           if (status === 'claimed') {
-            newQty = Math.max(0, Number(itemData.available_quantity || 0) - qtyDelta);
+            newQty = Math.max(0, currentAvail - qtyDelta);
           } else if (status === 'returned') {
             newQty = Math.min(
               Number(itemData.total_quantity || 0),
-              Number(itemData.available_quantity || 0) + qtyDelta
+              currentAvail + qtyDelta
             );
           }
 
-          await supabase
+          // Try updating available_quantity first
+          const { error: stockErr } = await supabase
             .from('items')
             .update({ available_quantity: newQty })
             .filter('id', 'eq', itemData.id);
+
+          // If available_quantity column doesn't exist, fall back to availability
+          if (stockErr && stockErr.message && stockErr.message.includes('available_quantity')) {
+            await supabase
+              .from('items')
+              .update({ availability: newQty })
+              .filter('id', 'eq', itemData.id);
+          }
         }
       }
     } catch (stockErr) {
