@@ -8,13 +8,11 @@ import { createClient } from '@supabase/supabase-js';
 dotenv.config();
 
 const app = express();
-
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization']
 }));
-
 app.use(express.json());
 
 const supabase = createClient(
@@ -22,10 +20,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || ''
 );
 
-// Email dispatch via Brevo REST API
-// Brevo Mail Dispatcher with strict error surfacing
-// smarttrack-backend/server.js
-
+// Email dispatch via Brevo REST API with strict error surfacing
 async function sendActivationEmail(recipientEmail, recipientName, token, role) {
   const apiKey = process.env.BREVO_API_KEY;
   if (!apiKey) {
@@ -124,7 +119,6 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'An admin with this email or Staff ID already exists.' });
       }
 
-      // Insert admin with is_verified: false
       const { data, error } = await supabase
         .from('profiles')
         .insert([{
@@ -141,7 +135,6 @@ app.post('/api/auth/register', async (req, res) => {
 
       if (error) throw error;
 
-      // Generate activation token
       const token = jwt.sign(
         { id: data.id, role: 'admin' },
         process.env.JWT_SECRET || 'smarttrack-secret-key',
@@ -157,9 +150,7 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(201).json({
         message: 'Registration successful! An activation link has been sent to your email.'
       });
-
     } else {
-      // Borrower flow
       const { data: existing } = await supabase
         .from('borrowers')
         .select('id, email, staff_id')
@@ -170,7 +161,6 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'A borrower with this email or ID is already registered.' });
       }
 
-      // Insert borrower with is_verified: false
       const insertPayload = {
         full_name: resolvedName,
         email: cleanEmail,
@@ -188,7 +178,6 @@ app.post('/api/auth/register', async (req, res) => {
 
       if (error) throw error;
 
-      // Generate activation token
       const token = jwt.sign(
         { id: data.id, role: 'borrower' },
         process.env.JWT_SECRET || 'smarttrack-secret-key',
@@ -267,14 +256,12 @@ app.post('/api/auth/login', async (req, res) => {
       if (!isValid && storedHash.startsWith('$2')) {
         isValid = await bcrypt.compare(cleanPassword, storedHash);
       }
-
       if (isValid) {
         if (!adminUser.is_verified) {
           return res.status(403).json({
             error: 'Account not verified. Please check your email to activate your account.'
           });
         }
-
         const token = jwt.sign(
           { id: adminUser.id, role: adminUser.role || 'admin', email: adminUser.email },
           process.env.JWT_SECRET || 'smarttrack-secret-key',
@@ -302,14 +289,12 @@ app.post('/api/auth/login', async (req, res) => {
       if (!isValid && storedPass.startsWith('$2')) {
         isValid = await bcrypt.compare(cleanPassword, storedPass);
       }
-
       if (isValid) {
         if (!borrowerUser.is_verified) {
           return res.status(403).json({
             error: 'Account not verified. Please check your email to activate your account.'
           });
         }
-
         const token = jwt.sign(
           { id: borrowerUser.id, role: 'borrower', email: borrowerUser.email },
           process.env.JWT_SECRET || 'smarttrack-secret-key',
@@ -334,17 +319,14 @@ app.post('/api/auth/login', async (req, res) => {
 // ==========================================
 // CATALOG & RESTOCK (items table)
 // ==========================================
-// Get all equipment catalog items (Compatible with both Web and Mobile schemas)
 app.get('/api/catalog', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('items')
       .select('*')
       .order('name');
-    
-    if (error) throw error;
 
-    // Normalize keys so mobile app never reads undefined
+    if (error) throw error;
     const normalized = (data || []).map(item => ({
       ...item,
       title: item.name,
@@ -352,7 +334,6 @@ app.get('/api/catalog', async (req, res) => {
       available: item.available_quantity,
       total: item.total_quantity
     }));
-
     res.json(normalized);
   } catch (err) {
     console.error('Catalog fetch error:', err);
@@ -411,37 +392,45 @@ app.post('/api/catalog', async (req, res) => {
 // ==========================================
 // REQUISITION ROUTES
 // ==========================================
+
 // 1. Submit a requisition ticket (From Mobile App)
-// Submit a requisition ticket (From Mobile App)
 app.post('/api/requisitions', async (req, res) => {
   try {
-    const { borrower_id, borrower_name, item_id, item_name, quantity, purpose } = req.body;
+    const { borrower_id, borrower_name, item_id, equipment_id, item_name, quantity, purpose } = req.body;
 
-    if (!borrower_name || !item_name) {
-      return res.status(400).json({ error: 'Borrower name and item details are required.' });
-    }
-
+    const bName = (borrower_name && borrower_name.trim()) ? borrower_name.trim() : 'Student Borrower';
+    const bId = (borrower_id && borrower_id.trim()) ? borrower_id.trim() : 'STU-001';
+    const resolvedItem = item_name || 'Equipment Item';
+    const resolvedItemId = String(item_id || equipment_id || '');
     const ticketNo = 'ST-' + Math.floor(100000 + Math.random() * 900000);
+
+    const insertPayload = {
+      ticket_no: ticketNo,
+      borrower_id: bId,
+      borrower_name: bName,
+      item_name: resolvedItem,
+      quantity: parseInt(quantity, 10) || 1,
+      purpose: purpose || 'Academic Project',
+      status: 'pending',
+      requested_at: new Date().toISOString()
+    };
+
+    if (resolvedItemId) {
+      insertPayload.item_id = resolvedItemId;
+      insertPayload.equipment_id = resolvedItemId;
+    }
 
     const { data, error } = await supabase
       .from('requisitions')
-      .insert([
-        {
-          ticket_no: ticketNo,
-          borrower_id: borrower_id || null,
-          borrower_name,
-          item_id: item_id || null,
-          item_name,
-          quantity: parseInt(quantity, 10) || 1,
-          purpose: purpose || 'Academic Project',
-          status: 'pending',
-          requested_at: new Date().toISOString()
-        }
-      ])
+      .insert([insertPayload])
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase Requisition Insert Error:', error);
+      throw error;
+    }
+
     res.status(201).json(data);
   } catch (err) {
     console.error('Requisition creation error:', err);
@@ -449,14 +438,31 @@ app.post('/api/requisitions', async (req, res) => {
   }
 });
 
-// Fetch borrower-specific tickets (For Mobile App "My Tickets")
-app.get('/api/requisitions/borrower/:name', async (req, res) => {
+// 2. Fetch all requisitions (For Webapp Admin Approval Desk)
+app.get('/api/requisitions', async (req, res) => {
   try {
-    const { name } = req.params;
     const { data, error } = await supabase
       .from('requisitions')
       .select('*')
-      .eq('borrower_name', decodeURIComponent(name))
+      .order('requested_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error('Fetch requisitions error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Fetch borrower-specific tickets (Supports matching by borrower_id OR borrower_name)
+app.get('/api/requisitions/borrower/:identifier', async (req, res) => {
+  try {
+    const rawId = decodeURIComponent(req.params.identifier).trim();
+
+    const { data, error } = await supabase
+      .from('requisitions')
+      .select('*')
+      .or(`borrower_name.ilike.%${rawId}%,borrower_id.eq.${rawId}`)
       .order('requested_at', { ascending: false });
 
     if (error) throw error;
@@ -466,11 +472,12 @@ app.get('/api/requisitions/borrower/:name', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // 4. Update Requisition Status (Approve, Reject, Claim, Return)
 app.patch('/api/requisitions/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // 'approved', 'rejected', 'claimed', 'returned'
+    const { status } = req.body;
 
     const updatePayload = { status };
     if (status === 'claimed') {
@@ -488,7 +495,6 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
 
     if (error) throw error;
 
-    // Adjust catalog stock counts when items are claimed or returned
     if (data && data.item_name) {
       if (status === 'claimed') {
         const { data: itemData } = await supabase.from('items').select('*').eq('name', data.item_name).single();
@@ -511,5 +517,6 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`SmartTrack Server active on port ${PORT}`));
