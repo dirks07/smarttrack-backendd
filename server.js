@@ -556,3 +556,24 @@ app.patch('/api/requisitions/:id/status', async (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`SmartTrack Server active on port ${PORT}`));
+// 5. Delete a Requisition Ticket
+app.delete('/api/requisitions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('requisitions')
+      .delete()
+      .filter('id', 'eq', id)
+      .select();
+
+    if (error) {
+      console.error('Delete requisition error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json({ message: 'Ticket deleted successfully', data });
+  } catch (err) {
+    console.error('Fatal delete error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
